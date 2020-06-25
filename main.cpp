@@ -7,7 +7,7 @@
 int main()
 {
 
-	std::string filePath = "E:\\vsProgram\\registration_triplePrinciple\\smallDavid";
+	std::string filePath = "E:\\vsProgram\\registration_triplePrinciple\\manpCloud";
 	std::vector<std::string> files;
 	std::string format = ".ply";
 	getFiles(filePath, format, files);

@@ -440,11 +440,12 @@ void computeSurfaceNormals(FeatureCloud& cloud,
 	}
 	norm_est.setInputCloud(cloud.getCloud());
 	norm_est.compute(*normals_);
+	std::vector<int> index;
+	pcl::removeNaNNormalsFromPointCloud(*normals_, *normals_, index);
 	cloud.setInputNormal(normals_);
-	std::cout << "NormalComputeOMP has finished\n";
-
+	pcl::copyPointCloud(*cloud.getCloud(), index, *cloud.getCloud());
 	end = clock();
-	std::cout << "computeSurfaceNormals has finished in "
+	std::cout << "computeSurfaceNormals() has finished in "
 		<< (end - start) / CLOCKS_PER_SEC << " s \n";
 };
 
@@ -800,6 +801,9 @@ void correspondences_rejection(FeatureCloud &source_cloud,
 	pcl::Correspondences &inliers,
 	int MaximumIterations, float Inlierthreshold)
 {
+	clock_t start, end;
+	start = clock();
+
 	pcl::registration::CorrespondenceRejectorSampleConsensus<PointT> sac;
 	sac.setInputSource(source_cloud.getKeypoint());
 	sac.setInputTarget(target_cloud.getKeypoint());
@@ -811,6 +815,9 @@ void correspondences_rejection(FeatureCloud &source_cloud,
 	sac.setInlierThreshold(Inlierthreshold);
 	sac.setMaximumIterations(MaximumIterations);
 	sac.getRemainingCorrespondences(correspondences, inliers);
+	end = clock();
+	std::cout << "CorrespondenceRejectorSampleConsensus computation time : "
+		<< float(end - start) / CLOCKS_PER_SEC << "s" << std::endl;
 }
 //对应点对剔除（ 自定义约束）
 void advancedMatching(PointCloudPtr target, PointCloudPtr source,
@@ -1411,7 +1418,7 @@ bool RotationTranslationCompute(FeatureCloud& cloudtarget,
 	//降采样获取关键点
 	if (true)
 	{
-		float leafSize = resolution * 4;
+		float leafSize = resolution * 5;
 		VoxelGrid_Filter(cloudtarget.getCloud(), cloudtarget.getCloud(), leafSize);
 		VoxelGrid_Filter(cloudsource.getCloud(), cloudsource.getCloud(), leafSize);
 	}
@@ -1430,12 +1437,9 @@ bool RotationTranslationCompute(FeatureCloud& cloudtarget,
 
 	//Normal Calculation
 	int normal_K = 50;
-	float normal_R = resolution * 2;
+	float normal_R = resolution * 5;
 	computeSurfaceNormals(cloudtarget, normal_K, normal_R);
 	computeSurfaceNormals(cloudsource, normal_K, normal_R);
-	//剔除法向量无效的点
-	removeNANfromNormal(cloudtarget);
-	removeNANfromNormal(cloudsource);
 
 	PointCloudPtr cloudtargetPtr = cloudtarget.getCloud();
 	PointCloudPtr cloudsourcePtr = cloudsource.getCloud();
@@ -1490,138 +1494,128 @@ bool RotationTranslationCompute(FeatureCloud& cloudtarget,
 	cloudsource.setKeypoints_Normal(src_keypoints_normal);
 
 	//Feature describe
-	float FPFH_radius = resolution * 3;
+	float FPFH_radius = resolution * 5;
 	computeFeatures_FPFH(cloudtarget, FPFH_radius);
 	computeFeatures_FPFH(cloudsource, FPFH_radius);
 	
 	// Correspondence Estimation
 	pcl::Correspondences all_correspondences;//剔除前
-	pcl::Correspondences inliers;//剔除后
+	pcl::Correspondences tuple_inliers;//tuple剔除后
 
 	correspondence_estimation("FPFH", cloudsource.getkeypointsFeatures_FPFH(), 
 							cloudtarget.getkeypointsFeatures_FPFH(),
 							all_correspondences);
 	std::cout << "correspondence_estimation size : " << all_correspondences.size() << std::endl;
 	//约束去除错误点对
-	float tupleScale = 0.95;
-	int tuple_max_cnt_ = 3000;
+	float tupleScale = 0.93;
+	int tuple_max_cnt_ = 1000;
 	advancedMatching(cloudtarget.getKeypoint(), cloudsource.getKeypoint(),
-		all_correspondences, inliers, tupleScale, tuple_max_cnt_);
-	std::cout << "advancedMatching size : " << inliers.size() << std::endl;
-	
-	
-	int loopNum = 100;
-	std::pair<float, int> scoreIdx;
-	std::vector<std::pair<float, int>> score_list;
-	std::vector<Eigen::Matrix4f, Eigen::aligned_allocator<Eigen::Matrix4f>> tran_list(loopNum + 1);
-	score_list.resize(loopNum+1);
+		all_correspondences, tuple_inliers, tupleScale, tuple_max_cnt_);
+	std::cout << "advancedMatching size : " << tuple_inliers.size() << std::endl;
+		
+	pcl::Correspondences tmpInliers;//剔除后
+	tmpInliers.insert(tmpInliers.begin(), tuple_inliers.begin(), tuple_inliers.end());
+	//基于SAC去除
+	if (true)
+	{
+		correspondences_rejection(cloudsource, cloudtarget,
+			tmpInliers, tmpInliers,
+			35, resolution*3);//0 1 为 50， 
 
-	//for (int num = 1; num < loopNum; ++num)
-	//{
-	//	std::cout << "\n**************************  " << num << "  ****************************\n\n";
-		pcl::Correspondences tmpInliers;//剔除后
-		tmpInliers.insert(tmpInliers.begin(), inliers.begin(), inliers.end());
-		//基于SAC去除
-		if (true)
-		{
-			correspondences_rejection(cloudsource, cloudtarget,
-				tmpInliers, tmpInliers,
-				1000, resolution * 3);//0 1 为 50， 
-		}
-		std::cout << "correspondences_rejection size : " << tmpInliers.size() << std::endl;
+	}
+	std::cout << "SAC  correspondences_rejection size : " << tmpInliers.size() << std::endl;
 
-		PointCloudPtr temp_target(new PointCloud);
-		PointCloudPtr temp_source(new PointCloud);
-		pcl::copyPointCloud(*cloudtarget.getCloud(), *temp_target);
-		pcl::copyPointCloud(*cloudsource.getCloud(), *temp_source);
-		if (false)
-		{
-			showPointCloudCorrespondences("all_correspondences", temp_target,
-				temp_source, inliers, 5);
-			showPointCloudCorrespondences("inliers", temp_target,
-				temp_source, tmpInliers);
-		}
+	PointCloudPtr temp_target(new PointCloud);
+	PointCloudPtr temp_source(new PointCloud);
+	pcl::copyPointCloud(*cloudtarget.getCloud(), *temp_target);
+	pcl::copyPointCloud(*cloudsource.getCloud(), *temp_source);
+	if (true)
+	{
+		showPointCloudCorrespondences("all_correspondences", temp_target,
+			temp_source, all_correspondences, 10);
+		showPointCloudCorrespondences("inliers", temp_target,
+			temp_source, tmpInliers, 10);
+	}
 
-		if (tmpInliers.size() == 0)
-		{
-			std::cout << "Registration Error : inliers size : 0 " << std::endl;
-			return false;
-		}
+	if (tmpInliers.size() == 0)
+	{
+		std::cout << "Registration Error : inliers size : 0 " << std::endl;
+		return false;
+	}
 
-		//根据匹配点对重新确立关键点
-		FeatureCloud targetCloud_Keypoint, sourceCloud_Keypoint;
-		PointCloudPtr targetKeypoint_(new PointCloud);
-		PointCloudPtr sourceKeypoint_(new PointCloud);
-		NormalsPtr targetKeypointNormal_(new SurfaceNormals);
-		NormalsPtr sourceKeypointNormal_(new SurfaceNormals);
-		FPFH_features::Ptr targetKeypointFPFH_(new FPFH_features);
-		FPFH_features::Ptr sourceKeypointFPFH_(new FPFH_features);
+	//根据匹配点对重新确立关键点
+	FeatureCloud targetCloud_Keypoint, sourceCloud_Keypoint;
+	PointCloudPtr targetKeypoint_(new PointCloud);
+	PointCloudPtr sourceKeypoint_(new PointCloud);
+	NormalsPtr targetKeypointNormal_(new SurfaceNormals);
+	NormalsPtr sourceKeypointNormal_(new SurfaceNormals);
+	FPFH_features::Ptr targetKeypointFPFH_(new FPFH_features);
+	FPFH_features::Ptr sourceKeypointFPFH_(new FPFH_features);
 
-		for (size_t i = 0; i < tmpInliers.size(); ++i)
-		{
-			PointT source = cloudsource.getKeypoint()->at(tmpInliers[i].index_query);
-			PointT target = cloudtarget.getKeypoint()->at(tmpInliers[i].index_match);
+	for (size_t i = 0; i < tmpInliers.size(); ++i)
+	{
+		PointT source = cloudsource.getKeypoint()->at(tmpInliers[i].index_query);
+		PointT target = cloudtarget.getKeypoint()->at(tmpInliers[i].index_match);
 
-			NormalT sourceNormal = cloudsource.getkeypointsNormal()->at(tmpInliers[i].index_query);
-			NormalT targetNormal = cloudtarget.getkeypointsNormal()->at(tmpInliers[i].index_match);
+		NormalT sourceNormal = cloudsource.getkeypointsNormal()->at(tmpInliers[i].index_query);
+		NormalT targetNormal = cloudtarget.getkeypointsNormal()->at(tmpInliers[i].index_match);
 
-			FPFH33_FeatureT sourceFPFH = cloudsource.getkeypointsFeatures_FPFH()->at(tmpInliers[i].index_query);
-			FPFH33_FeatureT targetFPFH = cloudtarget.getkeypointsFeatures_FPFH()->at(tmpInliers[i].index_match);
+		FPFH33_FeatureT sourceFPFH = cloudsource.getkeypointsFeatures_FPFH()->at(tmpInliers[i].index_query);
+		FPFH33_FeatureT targetFPFH = cloudtarget.getkeypointsFeatures_FPFH()->at(tmpInliers[i].index_match);
 
-			targetKeypoint_->points.push_back(target);
-			sourceKeypoint_->points.push_back(source);
+		targetKeypoint_->points.push_back(target);
+		sourceKeypoint_->points.push_back(source);
 
-			targetKeypointNormal_->points.push_back(targetNormal);
-			sourceKeypointNormal_->points.push_back(sourceNormal);
+		targetKeypointNormal_->points.push_back(targetNormal);
+		sourceKeypointNormal_->points.push_back(sourceNormal);
 
-			targetKeypointFPFH_->points.push_back(targetFPFH);
-			sourceKeypointFPFH_->points.push_back(sourceFPFH);
-		}
-		targetCloud_Keypoint.setKeypoints(targetKeypoint_);
-		sourceCloud_Keypoint.setKeypoints(sourceKeypoint_);
-		targetCloud_Keypoint.setKeypoints_Normal(targetKeypointNormal_);
-		sourceCloud_Keypoint.setKeypoints_Normal(sourceKeypointNormal_);
-		targetCloud_Keypoint.setKeypoints_FPFH(targetKeypointFPFH_);
-		sourceCloud_Keypoint.setKeypoints_FPFH(sourceKeypointFPFH_);
-		//Construct PointNormal建立法向量点云
-		construct_PointNormal(cloudtarget, cloudsource);
-		construct_PointNormal(targetCloud_Keypoint, sourceCloud_Keypoint);
+		targetKeypointFPFH_->points.push_back(targetFPFH);
+		sourceKeypointFPFH_->points.push_back(sourceFPFH);
+	}
+	targetCloud_Keypoint.setKeypoints(targetKeypoint_);
+	sourceCloud_Keypoint.setKeypoints(sourceKeypoint_);
+	targetCloud_Keypoint.setKeypoints_Normal(targetKeypointNormal_);
+	sourceCloud_Keypoint.setKeypoints_Normal(sourceKeypointNormal_);
+	targetCloud_Keypoint.setKeypoints_FPFH(targetKeypointFPFH_);
+	sourceCloud_Keypoint.setKeypoints_FPFH(sourceKeypointFPFH_);
+	//Construct PointNormal建立法向量点云
+	construct_PointNormal(cloudtarget, cloudsource);
+	construct_PointNormal(targetCloud_Keypoint, sourceCloud_Keypoint);
 
-		Eigen::Matrix4f tran = Eigen::Matrix4f::Identity();
-		//SVD
-		if (false) {
+	Eigen::Matrix4f tran = Eigen::Matrix4f::Identity();
+	//SVD
+	if (false) {
 
-			float threshold = 0.01;
-			int numIteration = 1;
-			SVD_Transform(targetCloud_Keypoint.getKeypoint(),
-				sourceCloud_Keypoint.getKeypoint(),
-				tran, numIteration, threshold);
-		}
+		float threshold = 0.01;
+		int numIteration = 1;
+		SVD_Transform(targetCloud_Keypoint.getKeypoint(),
+			sourceCloud_Keypoint.getKeypoint(),
+			tran, numIteration, threshold);
+	}
 
-		//SAC-IA
-		if (true)
-		{
-			float minsampleDistance = resolution * 2;
-			int numofSample = tmpInliers.size() / 5;
-			int correspondenceRandomness = 20;
-			SAC_IA_Transform(sourceCloud_Keypoint, targetCloud_Keypoint, minsampleDistance,
-				numofSample, correspondenceRandomness, tran);
-		}
+	//SAC-IA
+	if (true)
+	{
+		float minsampleDistance = resolution *2;
+		int numofSample = tmpInliers.size() / 4;
+		int correspondenceRandomness = 20;
+		SAC_IA_Transform(sourceCloud_Keypoint, targetCloud_Keypoint, minsampleDistance,
+			numofSample, correspondenceRandomness, tran);
+	}
 
-		//ICP
-		if (true)
-		{
-			float transEps = 1e-10;//设置两次变化矩阵之间的差值（一般设置为1e-10即可）
-			float maxCorresDist = 0.7;//设置对应点对之间的最大距离（此值对配准结果影响较大）
-			float EuclFitEps = 0.0001;//设置收敛条件是均方误差和小于阈值,停止迭代；
-			float outlThresh = 0.1;
-			int maxIteration = 60;
-			scoreIdx.first = iterative_closest_points("SVD", false, false,
-				sourceCloud_Keypoint, targetCloud_Keypoint,
-				transEps, maxCorresDist, EuclFitEps,
-				outlThresh, maxIteration, tran);
-			//scoreIdx.second = num;
-		}
+	//ICP
+	if (true)
+	{
+		float transEps = 1e-10;//设置两次变化矩阵之间的差值（一般设置为1e-10即可）
+		float maxCorresDist = resolution*0.8;//设置对应点对之间的最大距离（此值对配准结果影响较大）
+		float EuclFitEps = 0.0001;//设置收敛条件是均方误差和小于阈值,停止迭代；
+		float outlThresh = resolution*1.5;
+		int maxIteration = 100;
+		iterative_closest_points("SVD", false, false,
+			sourceCloud_Keypoint, targetCloud_Keypoint,
+			transEps, maxCorresDist, EuclFitEps,
+			outlThresh, maxIteration, tran);
+	}
 
 		//score_list.push_back(scoreIdx);
 		//tran_list.push_back(tran);
@@ -1708,11 +1702,13 @@ void showPointCloudCorrespondences(std::string viewerName,
 
 	//  We are translating the model so that it doesn't end in the middle of the scene representation
 	Eigen::Matrix4f tran = Eigen::Matrix4f::Identity();
-	tran(1, 3) = 200;
-	pcl::transformPointCloud(*cloudTarget_, *cloudTarget_, tran);
+	tran(0, 3) = 500;
+	PointCloudPtr tmpTarget(new PointCloud);
+	pcl::copyPointCloud(*cloudTarget_, *tmpTarget);
+	pcl::transformPointCloud(*tmpTarget, *tmpTarget, tran);
 
-	pcl::visualization::PointCloudColorHandlerCustom<PointT> color(cloudTarget_, 0, 255, 0);
-	viewer.addPointCloud(cloudTarget_, color, "Target");
+	pcl::visualization::PointCloudColorHandlerCustom<PointT> color(tmpTarget, 0, 255, 0);
+	viewer.addPointCloud(tmpTarget, color, "Target");
 	viewer.addPointCloud(cloudSource_, color, "Source");
 
 	for (size_t i = 0; i < corr_.size(); ++i)
@@ -1720,7 +1716,7 @@ void showPointCloudCorrespondences(std::string viewerName,
 		if (i % showThreshold == 0)
 		{
 			PointT source = cloudSource_->at(corr_[i].index_query);
-			PointT target = cloudTarget_->at(corr_[i].index_match);
+			PointT target = tmpTarget->at(corr_[i].index_match);
 			char name[80] = "correspondece_line";
 			sprintf(name, "_%d", i);
 			viewer.addLine<PointT, PointT>(target, source, 0, 0, 255, name);
